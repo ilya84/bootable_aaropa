@@ -443,6 +443,37 @@ fi || debug_shell fatal-err
 
 remount_rw
 
+# los-tv step39: recovery по BCB из misc.img (adb reboot recovery / reboot recovery).
+# Android-init пишет в misc команду "boot-recovery"; GRUB её не читает, поэтому
+# ловим флаг здесь — до выбора MODE_BASE — и грузим recovery как по androidboot.mode.
+if [ -z "$RCVRY" ] && [ -e "/mnt/$SRC/misc.img" ]; then
+	if busybox head -c 32 "/mnt/$SRC/misc.img" 2>/dev/null | busybox grep -q boot-recovery; then
+		RCVRY=1
+	fi
+fi
+
+# los-tv: маркеры режима для заголовка GRUB (их ставит los-tv-boot-mode.sh
+# в Android на триггере shutdown). GRUB уже показал меню и выбрал пункт,
+# поэтому здесь маркеры больше не нужны — удаляем, чтобы суффикс не залипал.
+if [ -d "/mnt/$SRC/boot/grub" ]; then
+	rm -f "/mnt/$SRC/boot/grub/mode-sideload" "/mnt/$SRC/boot/grub/mode-recovery" 2>/dev/null
+fi
+
+# los-tv: MODE in android.cfg is consumed by this boot (GRUB has already read
+# it).  Reset it so a plain reboot does not fall back into recovery, e.g. when
+# the recovery image predates init.recovery.sh reset_boot_mode.
+if [ -f "/mnt/$SRC/boot/grub/android.cfg" ]; then
+	sed -i "s/^MODE=.*/MODE=normal/" "/mnt/$SRC/boot/grub/android.cfg" 2>/dev/null
+fi
+
+# los-tv step40: в recovery нужен драйвер NIC (r8169=m в ядре). В recovery-рамдиске
+# модулей нет, поэтому грузим их из initrd до switch_root; firmware тоже в initrd.
+if [ "$RCVRY" ]; then
+	for _m in mdio-bus libphy fixed_phy fwnode_mdio of_mdio mdio_devres realtek r8169 cdc_ether cdc_ncm ax88179_178a r8152; do
+		/bin/insmod "/lib/modules/6.18.21-zenith+/$_m.ko" 2>/dev/null || true
+	done
+fi
+
 if [ "$ISO" ]; then
 	mount -o loop "/mnt/$SRC/$ISO" /mnt
 fi
@@ -530,6 +561,49 @@ else
 
 	# Load data bind mounts
 	bass_data_binds
+
+	# los-tv: persistent kmsg log on the ESP (hardware diagnostics).
+	# Enabled by default; disable with androidboot.los_tv_kmsglog=0.
+	# The ESP is located by UUID from fstab.android (no hardcoded device).
+	if ! grep -q 'androidboot.los_tv_kmsglog=0' /proc/cmdline; then
+		esp_spec=
+		if [ -f "/mnt/$SRC/fstab.android" ]; then
+			while read -r _src _tgt _rest; do
+				[ "$_tgt" = "esp" ] && { esp_spec=$_src; break; }
+			done <"/mnt/$SRC/fstab.android"
+		fi
+		esp_dev=
+		[ -n "$esp_spec" ] && esp_dev=$(find_device "$esp_spec" 2>/dev/null)
+		if [ -n "$esp_dev" ] && [ -b "$esp_dev" ]; then
+			mkdir -p /tmp/esp
+			if mount -t vfat -o sync,umask=0022 "$esp_dev" /tmp/esp 2>/dev/null; then
+				kmsg_log=/tmp/esp/boot-debug.txt
+				[ "$RCVRY" ] && kmsg_log=/tmp/esp/boot-debug-recovery.txt
+				(
+					exec >"$kmsg_log" 2>&1
+					echo "==== los-tv initrd log ===="
+					echo -n "uptime: "; cat /proc/uptime
+					echo -n "cmdline: "; cat /proc/cmdline
+					echo "esp: $esp_dev ($esp_spec)"
+					echo "los-tv: kmsg logger active ($esp_dev)" > /dev/kmsg
+					exec /bin/busybox cat /dev/kmsg
+				) &
+				sleep 2
+			fi
+		fi
+	fi
+
+	# los-tv: aconfigd needs /metadata (no metadata partition on this port).
+	# Keep it on the cdrom partition (like /data) so aconfig flag overrides
+	# and APEX rollback data survive reboots. Created on first boot; fall
+	# back to tmpfs if the partition is not writable.
+	if [ -d "/mnt/$SRC" ]; then
+		mkdir -p "/mnt/$SRC/metadata" 2>/dev/null
+		mount --bind "/mnt/$SRC/metadata" "$MODE_BASE/metadata" 2>/dev/null || {
+			mkdir -p "$MODE_BASE/metadata"
+			mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs "$MODE_BASE/metadata" 2>/dev/null || true
+		}
+	fi
 
 	# shellcheck disable=SC2093
 	exec ${SWITCH:-switch_root} $MODE_BASE /init

@@ -72,6 +72,16 @@ else
 systemimg  := $(PRODUCT_OUT)/system.img
 endif
 
+# los-tv step45: initrd is padded to a fixed size (16 MiB) so that the OTA
+# payload always fits the device files /mnt/cdrom/initrd_{a,b}.img expanded
+# to the same size. Trailing zeros after the gzip stream are ignored by the
+# kernel (proven on hardware/QEMU, see data/2026-10-19-recovery-bcb-step39.txt).
+INITRD_FIXED_SIZE := 16777216
+# Абсолютный путь: рецепт делает cd в $(TARGET_INITRD_OUT), поэтому
+# относительный $@.unpadded указывает в несуществующий каталог
+# (падение сборки initrd 2026-10-22/23).
+INITRD_UNPADDED := $(abspath $(PRODUCT_OUT)/initrd.img.unpadded)
+
 TARGET_INITRD_OUT := $(PRODUCT_OUT)/initrd
 INITRD_RAMDISK := $(TARGET_INITRD_OUT).img
 $(INITRD_RAMDISK): $(initrd_bin) $(systemimg) $(TARGET_INITRD_SCRIPTS) | $(ACP) $(HOST_OUT_EXECUTABLES)/toybox
@@ -82,7 +92,18 @@ $(INITRD_RAMDISK): $(initrd_bin) $(systemimg) $(TARGET_INITRD_SCRIPTS) | $(ACP) 
 	$(if $(RELEASE_OS_TITLE),echo "OS_TITLE=$(RELEASE_OS_TITLE)" >> $(TARGET_INITRD_OUT)/scripts/00-ver)
 	$(if $(INSTALL_PREFIX),echo "INSTALL_PREFIX=$(INSTALL_PREFIX)" >> $(TARGET_INITRD_OUT)/scripts/00-ver)
 	$(ACP) -dpr $(initrd_dir)/* $(initrd_lib_dir)/* $(TARGET_INITRD_OUT)
-	cd $(TARGET_INITRD_OUT); find . | cpio -o | gzip -9 > ../initrd.img
+	cd $(TARGET_INITRD_OUT); find . | cpio -o | gzip -9 > $(INITRD_UNPADDED)
+	$(hide) sz=$$(wc -c < $(INITRD_UNPADDED)); \
+	  if [ $$sz -gt $(INITRD_FIXED_SIZE) ]; then \
+	    echo "ERROR: initrd accumulated to $$sz bytes, exceeds INITRD_FIXED_SIZE=$(INITRD_FIXED_SIZE) (16 MiB)." >&2; \
+	    echo "ERROR: trim initrd/initrd_lib contents or increase INITRD_FIXED_SIZE in bootable/aaropa/Android.mk." >&2; \
+	    exit 1; \
+	  fi; \
+	  cp $(INITRD_UNPADDED) $@; \
+	  truncate -s $(INITRD_FIXED_SIZE) $@; \
+	  rm -f $(INITRD_UNPADDED); \
+	  final=$$(wc -c < $@); \
+	  [ "$$final" -eq "$(INITRD_FIXED_SIZE)" ] || { echo "ERROR: initrd padding failed ($$final bytes)" >&2; exit 1; }
 
 .PHONY: initrdimage
 initrdimage: $(INITRD_RAMDISK)
@@ -139,14 +160,15 @@ $(iso_dir): $(shell find $(LOCAL_PATH)/iso -type f | sort -r) | $(ACP)
 	$(hide) sed -i "s|VER|$(VER)|" $@/boot/grub/grub.cfg
 	$(hide) echo "$(BOARD_KERNEL_CMDLINE)" > $@/cmdline.txt
 
-ISO_IMAGE := $(PRODUCT_OUT)/bass-lineout-$(LINEAGE_VERSION).iso
+# los-tv: keep the historical LineageOS-style artefact name
+# (BassOS/"lineout" branding is upstream; project is LineageOS TV).
+ISO_IMAGE := $(PRODUCT_OUT)/lineage-$(LINEAGE_VERSION).iso
 $(ISO_IMAGE): $(iso_dir) $(BUILT_IMG)
 	@echo ----- Making iso image ------
 	PATH="/sbin:/usr/sbin:/bin:/usr/bin"; \
 	xorriso -as mkisofs -graft-points --modification-date=$(MOD_DATE) -b /boot/grub/i386-pc/eltorito.img \
 		-no-emul-boot -boot-load-size 4 -boot-info-table --grub2-boot-info --grub2-mbr $(BOOT_HYBRID) \
-		-hfsplus -apm-block-size 2048 -hfsplus-file-creator-type chrp tbxj /System/Library/CoreServices/.disk_label \
-		-hfs-bless-by i /System/Library/CoreServices/boot.efi --efi-boot efi.img -efi-boot-part --efi-boot-image \
+		--efi-boot efi.img -efi-boot-part --efi-boot-image \
 		--protective-msdos-label -o $@ $^ --sort-weight 0 / --sort-weight 1 /boot \
 		-V "$(DISK_LABEL)"
 	$(hide) $(SHA256) $(ISO_IMAGE) | sed "s|$(PRODUCT_OUT)/||" > $(ISO_IMAGE).sha256sum

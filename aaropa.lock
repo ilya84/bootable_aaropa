@@ -35,12 +35,12 @@ grub2-themes.ref=1979a59181fe80c7c5f383273c1722cfdaf1d33f
 
 [fetch.bliss]
 github_repo=Ananda-Aropa/aaropa_rootfs_installer_blissos
-tag=latest
+tag=20260905
 assets=install.sfs initrd_lib.tar.gz grub-rescue.iso boot_hybrid.img
 
 [fetch.bass]
 github_repo=Ananda-Aropa/aaropa_rootfs_installer_bass
-tag=latest
+tag=20260905
 assets=install.sfs initrd_lib.tar.gz grub-rescue.iso boot_hybrid.img
 
 [flavor.bliss]
